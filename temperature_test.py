@@ -14,6 +14,27 @@ import os
 import json
 import requests
 import threading
+import logging
+
+# 日志配置：同时输出到 program.log 和控制台
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler('program.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+# 将所有 print() 重定向到 logging
+_original_print = print
+def _print(*args, **kwargs):
+    kwargs.pop('flush', None)
+    msg = ' '.join(str(a) for a in args)
+    if msg:
+        logging.info(msg)
+print = _print
 
 # 配置文件路径
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
@@ -67,6 +88,10 @@ class TemperatureTestApp:
         self.config = self.load_config()
         if 'adb_device' in self.config:
             self.adb_device_var.set(self.config['adb_device'])
+        if not hasattr(self, 'click_enabled'):
+            self.click_enabled = self.config.get('click_enabled', False)
+        if not hasattr(self, 'click_steps'):
+            self.click_steps = self.config.get('click_steps', [])
         self.bind_config_events()
         print('配置加载完成', flush=True)
         
@@ -827,7 +852,12 @@ class TemperatureTestApp:
                     # 获取并显示当前截图区域配置
                     bbox = config.get('bbox', DEFAULT_BBOX)
                     print(f'当前截图区域: x1={bbox[0]}, y1={bbox[1]}, x2={bbox[2]}, y2={bbox[3]}', flush=True)
-                    
+
+                    # 加载点击步骤配置（存入 config 字典以确保持久化）
+                    config['click_enabled'] = config.get('click_enabled', False)
+                    config['click_timing'] = config.get('click_timing', 'before')
+                    config['click_steps'] = config.get('click_steps', [])
+
                     print('配置加载完成', flush=True)
                     return config
             except Exception as e:
@@ -1119,17 +1149,15 @@ class TemperatureTestApp:
     def configure_bbox(self):
         """配置截图区域"""
         print('开始配置截图区域...', flush=True)
-        # 暂停当前测试
         was_testing = self.is_testing
         if was_testing:
             self.stop_test()
-        
-        # 显示配置对话框
+
         dialog = tk.Toplevel(self.root)
         dialog.title('设置截图区域')
-        dialog.geometry('800x600')
-        
-        # 设置窗口居中
+        dialog.geometry('1100x700')
+        dialog.transient(self.root)
+
         dialog.update_idletasks()
         width = dialog.winfo_width()
         height = dialog.winfo_height()
@@ -1137,99 +1165,286 @@ class TemperatureTestApp:
         y = (dialog.winfo_screenheight() - height) // 2
         dialog.geometry(f'+{x}+{y}')
         print('配置对话框创建完成', flush=True)
-        
-        # 获取当前配置
+
         current_bbox = self.config.get('bbox', DEFAULT_BBOX)
-        
-        # 创建左侧面板
+        click_enabled = self.config.get('click_enabled', False)
+        click_steps = self.config.get('click_steps', [])
+
         left_panel = tb.Frame(dialog)
-        left_panel.pack(side=tk.LEFT, padx=10, pady=10)
-        
-        # 创建输入框
-        tb.Label(left_panel, text='左上角 X:').grid(row=0, column=0, padx=5, pady=5)
-        left_entry = tb.Entry(left_panel, width=10)
+        left_panel.pack(side=tk.LEFT, padx=10, pady=10, fill=tk.Y)
+
+        bbox_frame = tb.LabelFrame(left_panel, text='截图区域')
+        bbox_frame.pack(fill=tk.X, pady=(0, 8))
+
+        tb.Label(bbox_frame, text='左上角 X:').grid(row=0, column=0, padx=5, pady=3, sticky=E)
+        left_entry = tb.Entry(bbox_frame, width=10)
         left_entry.insert(0, str(current_bbox[0]))
-        left_entry.grid(row=0, column=1)
-        
-        tb.Label(left_panel, text='左上角 Y:').grid(row=1, column=0, padx=5, pady=5)
-        top_entry = tb.Entry(left_panel, width=10)
+        left_entry.grid(row=0, column=1, padx=5, pady=3)
+
+        tb.Label(bbox_frame, text='左上角 Y:').grid(row=1, column=0, padx=5, pady=3, sticky=E)
+        top_entry = tb.Entry(bbox_frame, width=10)
         top_entry.insert(0, str(current_bbox[1]))
-        top_entry.grid(row=1, column=1)
-        
-        tb.Label(left_panel, text='右下角 X:').grid(row=2, column=0, padx=5, pady=5)
-        right_entry = tb.Entry(left_panel, width=10)
+        top_entry.grid(row=1, column=1, padx=5, pady=3)
+
+        tb.Label(bbox_frame, text='右下角 X:').grid(row=2, column=0, padx=5, pady=3, sticky=E)
+        right_entry = tb.Entry(bbox_frame, width=10)
         right_entry.insert(0, str(current_bbox[2]))
-        right_entry.grid(row=2, column=1)
-        
-        tb.Label(left_panel, text='右下角 Y:').grid(row=3, column=0, padx=5, pady=5)
-        bottom_entry = tb.Entry(left_panel, width=10)
+        right_entry.grid(row=2, column=1, padx=5, pady=3)
+
+        tb.Label(bbox_frame, text='右下角 Y:').grid(row=3, column=0, padx=5, pady=3, sticky=E)
+        bottom_entry = tb.Entry(bbox_frame, width=10)
         bottom_entry.insert(0, str(current_bbox[3]))
-        bottom_entry.grid(row=3, column=1)
-        
-        # 创建右侧图像预览区域
+        bottom_entry.grid(row=3, column=1, padx=5, pady=3)
+
+        click_frame = tb.LabelFrame(left_panel, text='ADB 点击步骤')
+        click_frame.pack(fill=tk.BOTH, expand=YES)
+
+        click_enable_var = tk.BooleanVar(value=click_enabled)
+        tb.Checkbutton(click_frame, text='启用点击功能', variable=click_enable_var).pack(anchor=tk.W, padx=5, pady=4)
+
+        timing_frame = tb.Frame(click_frame)
+        timing_frame.pack(anchor=tk.W, padx=5, pady=2)
+        tb.Label(timing_frame, text='点击时机:').pack(side=tk.LEFT)
+        click_timing_var = tk.StringVar(value=self.config.get('click_timing', 'before'))
+        tb.Radiobutton(timing_frame, text='截图前', variable=click_timing_var, value='before').pack(side=tk.LEFT, padx=4)
+        tb.Radiobutton(timing_frame, text='截图后', variable=click_timing_var, value='after').pack(side=tk.LEFT, padx=4)
+
+        mode_hint = tk.StringVar(value='')
+        mode_hint_label = tb.Label(click_frame, textvariable=mode_hint, foreground='blue', font=('Arial', 8))
+        mode_hint_label.pack(anchor=tk.W, padx=5)
+
+        def on_click_enable_toggle():
+            if click_enable_var.get():
+                if not click_steps:
+                    mode_hint.set('请先点"添加步骤"，然后点击截图选取位置')
+                else:
+                    remaining = sum(1 for s in click_steps if s['x'] == 0 and s['y'] == 0)
+                    if remaining > 0:
+                        mode_hint.set(f'点击模式已开启，还有 {remaining} 步待设置位置')
+                    else:
+                        mode_hint.set('点击模式已开启，所有步骤位置已设置')
+            else:
+                mode_hint.set('')
+
+        click_enable_var.trace_add('write', lambda *_: on_click_enable_toggle())
+        on_click_enable_toggle()
+
+        tree_frame = tb.Frame(click_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=YES, padx=5, pady=2)
+
+        steps_columns = ('序号', 'X', 'Y', '延迟(秒)')
+        steps_tree = tb.Treeview(tree_frame, columns=steps_columns, show='headings', height=6)
+        steps_tree.heading('序号', text='#')
+        steps_tree.heading('X', text='X')
+        steps_tree.heading('Y', text='Y')
+        steps_tree.heading('延迟(秒)', text='延迟(秒)')
+        steps_tree.column('序号', width=30, stretch=False)
+        steps_tree.column('X', width=60, stretch=False)
+        steps_tree.column('Y', width=60, stretch=False)
+        steps_tree.column('延迟(秒)', width=70, stretch=False)
+        steps_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=YES)
+
+        steps_scrollbar = tb.Scrollbar(tree_frame, orient=tk.VERTICAL, command=steps_tree.yview)
+        steps_tree.configure(yscrollcommand=steps_scrollbar.set)
+        steps_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def refresh_steps_tree():
+            for item in steps_tree.get_children():
+                steps_tree.delete(item)
+            for i, s in enumerate(click_steps):
+                steps_tree.insert('', 'end', values=(i + 1, s['x'], s['y'], s['delay']))
+
+        refresh_steps_tree()
+
+        btn_row = tb.Frame(click_frame)
+        btn_row.pack(fill=tk.X, padx=5, pady=4)
+
+        def on_step_select(event):
+            sel = steps_tree.selection()
+            if sel:
+                values = steps_tree.item(sel[0], 'values')
+                idx = int(values[0]) - 1
+                mode_hint.set(f'步骤 {idx + 1}: X={click_steps[idx]["x"]}, Y={click_steps[idx]["y"]}, 延迟={click_steps[idx]["delay"]}s')
+
+        steps_tree.bind('<<TreeviewSelect>>', on_step_select)
+
+        def add_step():
+            delay_val = 1.0
+            click_steps.append({'x': 0, 'y': 0, 'delay': delay_val})
+            refresh_steps_tree()
+            new_children = steps_tree.get_children()
+            if new_children:
+                steps_tree.selection_set(new_children[-1])
+                steps_tree.see(new_children[-1])
+
+        def remove_step():
+            sel = steps_tree.selection()
+            if not sel:
+                messagebox.showwarning('提示', '请先选择要删除的步骤')
+                return
+            values = steps_tree.item(sel[0], 'values')
+            idx = int(values[0]) - 1
+            if 0 <= idx < len(click_steps):
+                click_steps.pop(idx)
+                state['next_click_idx'] = max(0, min(state['next_click_idx'], len(click_steps)))
+                refresh_steps_tree()
+                mode_hint.set('')
+
+        def edit_step_delay():
+            sel = steps_tree.selection()
+            if not sel:
+                messagebox.showwarning('提示', '请先选择步骤')
+                return
+            values = steps_tree.item(sel[0], 'values')
+            idx = int(values[0]) - 1
+            if 0 <= idx < len(click_steps):
+                delay_dialog = tk.Toplevel(dialog)
+                delay_dialog.title(f'设置步骤 {idx + 1} 延迟')
+                delay_dialog.geometry('280x120')
+                delay_dialog.transient(dialog)
+                delay_dialog.grab_set()
+
+                tb.Label(delay_dialog, text='点击后延迟(秒):').pack(padx=10, pady=(15, 5))
+                delay_var = tk.StringVar(value=str(click_steps[idx]['delay']))
+                delay_entry = tb.Entry(delay_dialog, textvariable=delay_var, width=15)
+                delay_entry.pack(padx=10)
+                delay_entry.select_range(0, tk.END)
+                delay_entry.focus_set()
+
+                def confirm_delay():
+                    try:
+                        new_delay = float(delay_var.get())
+                        if new_delay < 0:
+                            raise ValueError
+                        click_steps[idx]['delay'] = new_delay
+                        refresh_steps_tree()
+                        delay_dialog.destroy()
+                    except (ValueError, TypeError):
+                        messagebox.showerror('错误', '请输入有效的正数')
+
+                tb.Button(delay_dialog, text='确定', command=confirm_delay, style='success.TButton').pack(pady=8)
+
+        def clear_steps():
+            if click_steps and messagebox.askyesno('确认', '确定清空所有点击步骤?'):
+                click_steps.clear()
+                state['next_click_idx'] = 0
+                refresh_steps_tree()
+                mode_hint.set('')
+
+        tb.Button(btn_row, text='添加步骤', command=add_step, style='success.TButton').pack(side=tk.LEFT, padx=2)
+        tb.Button(btn_row, text='删除步骤', command=remove_step, style='danger.TButton').pack(side=tk.LEFT, padx=2)
+        tb.Button(btn_row, text='设置延迟', command=edit_step_delay, style='info.TButton').pack(side=tk.LEFT, padx=2)
+        tb.Button(btn_row, text='清空', command=clear_steps, style='secondary.TButton').pack(side=tk.LEFT, padx=2)
+
         preview_frame = tb.Frame(dialog)
         preview_frame.pack(side=tk.RIGHT, padx=10, pady=10, expand=True, fill=tk.BOTH)
-        
-        # 创建画布
-        canvas = tk.Canvas(preview_frame, width=600, height=500)
+
+        canvas = tk.Canvas(preview_frame, bg='#2b2b2b')
         canvas.pack(expand=True, fill=tk.BOTH)
-        
-        # 获取原始图像（传入 crop=False 取全屏，用于显示裁剪区域）
+
         screenshot_array = self.capture_screen(crop=False)
+
+        state = {
+            'scale_x': 1.0, 'scale_y': 1.0,
+            'rect_id': None, 'start_x': 0, 'start_y': 0,
+            'dragging_rect': False,
+            'click_markers': [],
+            'next_click_idx': 0,
+        }
+
+        def redraw_click_markers():
+            for marker_id in state['click_markers']:
+                canvas.delete(marker_id)
+            state['click_markers'].clear()
+            for i, s in enumerate(click_steps):
+                cx = s['x'] * state['scale_x']
+                cy = s['y'] * state['scale_y']
+                r = 8
+                mid = canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                                         outline='#00ff00', width=2, fill='')
+                txt = canvas.create_text(cx, cy - r - 10, text=str(i + 1),
+                                         fill='#00ff00', font=('Arial', 9, 'bold'))
+                state['click_markers'].extend([mid, txt])
+
+        def find_next_unassigned():
+            for i, s in enumerate(click_steps):
+                if s['x'] == 0 and s['y'] == 0:
+                    return i
+            return 0 if click_steps else -1
+
         if screenshot_array is not None:
-            # 转换为PIL图像
             image = Image.fromarray(cv2.cvtColor(screenshot_array, cv2.COLOR_BGR2RGB))
-            
-            # 调整图像大小以适应画布
             image.thumbnail((600, 500))
             photo = ImageTk.PhotoImage(image)
-            
-            # 显示图像
             canvas.create_image(0, 0, anchor=tk.NW, image=photo)
-            canvas.image = photo  # 保持引用
-            
-            # 计算缩放比例
-            scale_x = image.size[0] / screenshot_array.shape[1]
-            scale_y = image.size[1] / screenshot_array.shape[0]
-            
-            # 绘制当前选择框
-            rect_id = canvas.create_rectangle(
-                current_bbox[0] * scale_x,
-                current_bbox[1] * scale_y,
-                current_bbox[2] * scale_x,
-                current_bbox[3] * scale_y,
-                outline='red'
+            canvas.image = photo
+
+            state['scale_x'] = image.size[0] / screenshot_array.shape[1]
+            state['scale_y'] = image.size[1] / screenshot_array.shape[0]
+
+            state['rect_id'] = canvas.create_rectangle(
+                current_bbox[0] * state['scale_x'],
+                current_bbox[1] * state['scale_y'],
+                current_bbox[2] * state['scale_x'],
+                current_bbox[3] * state['scale_y'],
+                outline='red', width=2
             )
-            
-            # 鼠标事件变量
-            start_x = start_y = 0
-            
+
             def on_mouse_down(event):
-                nonlocal start_x, start_y
-                start_x = event.x
-                start_y = event.y
-                canvas.coords(rect_id, event.x, event.y, event.x, event.y)
-            
+                state['start_x'] = event.x
+                state['start_y'] = event.y
+
+                if click_enable_var.get() and click_steps:
+                    real_x = int(event.x / state['scale_x'])
+                    real_y = int(event.y / state['scale_y'])
+                    idx = find_next_unassigned()
+                    if idx < 0:
+                        idx = state['next_click_idx'] % len(click_steps)
+                    click_steps[idx]['x'] = real_x
+                    click_steps[idx]['y'] = real_y
+                    state['next_click_idx'] = idx + 1
+                    refresh_steps_tree()
+                    redraw_click_markers()
+                    steps_children = steps_tree.get_children()
+                    if idx < len(steps_children):
+                        steps_tree.selection_set(steps_children[idx])
+                        steps_tree.see(steps_children[idx])
+                    remaining = len(click_steps) - state['next_click_idx']
+                    if remaining > 0:
+                        mode_hint.set(f'步骤 {idx + 1} 已设置，还有 {remaining} 步待设置，继续点击')
+                    else:
+                        mode_hint.set(f'步骤 {idx + 1} 已设置，所有步骤位置已设置完成！')
+                    return
+
+                state['dragging_rect'] = True
+                canvas.coords(state['rect_id'], event.x, event.y, event.x, event.y)
+
             def on_mouse_drag(event):
-                canvas.coords(rect_id, start_x, start_y, event.x, event.y)
-                
-                # 更新输入框
-                x1, x2 = sorted([start_x, event.x])
-                y1, y2 = sorted([start_y, event.y])
+                if not state['dragging_rect']:
+                    return
+                canvas.coords(state['rect_id'], state['start_x'], state['start_y'], event.x, event.y)
+
+                x1, x2 = sorted([state['start_x'], event.x])
+                y1, y2 = sorted([state['start_y'], event.y])
                 left_entry.delete(0, tk.END)
-                left_entry.insert(0, str(int(x1 / scale_x)))
+                left_entry.insert(0, str(int(x1 / state['scale_x'])))
                 top_entry.delete(0, tk.END)
-                top_entry.insert(0, str(int(y1 / scale_y)))
+                top_entry.insert(0, str(int(y1 / state['scale_y'])))
                 right_entry.delete(0, tk.END)
-                right_entry.insert(0, str(int(x2 / scale_x)))
+                right_entry.insert(0, str(int(x2 / state['scale_x'])))
                 bottom_entry.delete(0, tk.END)
-                bottom_entry.insert(0, str(int(y2 / scale_y)))
-            
-            # 绑定鼠标事件
+                bottom_entry.insert(0, str(int(y2 / state['scale_y'])))
+
+            def on_mouse_up(event):
+                state['dragging_rect'] = False
+
             canvas.bind('<Button-1>', on_mouse_down)
             canvas.bind('<B1-Motion>', on_mouse_drag)
-        
-        def save_bbox():
+            canvas.bind('<ButtonRelease-1>', on_mouse_up)
+
+            redraw_click_markers()
+
+        def save_all():
             try:
                 new_bbox = (
                     int(left_entry.get()),
@@ -1238,17 +1453,41 @@ class TemperatureTestApp:
                     int(bottom_entry.get())
                 )
                 self.config['bbox'] = new_bbox
+                self.config['click_enabled'] = click_enable_var.get()
+                self.config['click_timing'] = click_timing_var.get()
+                self.config['click_steps'] = list(click_steps)
                 self.save_config()
-                messagebox.showinfo('成功', '截图区域设置已保存')
+                messagebox.showinfo('成功', '设置已保存')
                 dialog.destroy()
-                
-                # 如果之前在测试，恢复测试
                 if was_testing:
                     self.start_test()
             except ValueError:
                 messagebox.showerror('错误', '请输入有效的数字')
-        
-        tb.Button(left_panel, text='保存', command=save_bbox).grid(row=4, column=0, columnspan=2, pady=20)
+
+        save_btn_frame = tb.Frame(left_panel)
+        save_btn_frame.pack(fill=tk.X, pady=(8, 0))
+        tb.Button(save_btn_frame, text='保存设置', command=save_all, style='success.TButton').pack(fill=tk.X)
+
+    def _run_click_steps_once(self):
+        """执行一轮点击步骤（在测试线程中同步调用）"""
+        click_steps = self.config.get('click_steps', [])
+        device = self.adb_device_var.get().strip()
+        if not device or not click_steps:
+            return
+        import subprocess
+        for i, step in enumerate(click_steps):
+            x = step['x']
+            y = step['y']
+            delay = step.get('delay', 1.0)
+            try:
+                subprocess.run(
+                    [ADB_PATH, '-s', device, 'shell', 'input', 'tap', str(x), str(y)],
+                    capture_output=True, timeout=10
+                )
+            except Exception as e:
+                print(f'点击步骤 {i + 1} 异常: {str(e)}', flush=True)
+            if delay > 0:
+                time.sleep(delay)
 
     def get_temperature(self):
         """获取温度值"""
@@ -1459,8 +1698,17 @@ class TemperatureTestApp:
     def _read_temp_thread(self, interval):
         """后台线程：截图 + 图像处理 + OCR"""
         try:
+            click_enabled = self.config.get('click_enabled', False)
+            click_timing = self.config.get('click_timing', 'before')
+
+            if click_enabled and click_timing == 'before':
+                self._run_click_steps_once()
+
             temp = self.get_temperature()
-            # 在主线程中更新界面
+
+            if click_enabled and click_timing == 'after':
+                self._run_click_steps_once()
+
             self.root.after(0, self._on_temp_received, temp, interval)
         except Exception as e:
             print(f'温度读取线程错误: {str(e)}', flush=True)
@@ -1478,7 +1726,7 @@ class TemperatureTestApp:
         if temp is not None:
             self.temp_label.configure(text=f'{temp}°C')
             # 记录数据
-            timestamp_text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            timestamp_text = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
             timestamp = datetime.now()
             self.test_data.append((timestamp_text, temp))
             self.add_chart_data(timestamp, temp)
@@ -1599,9 +1847,9 @@ class TemperatureTestApp:
             if temp is not None:
                 self.temp_label.configure(text=f'{temp:.1f}°C')
                 timestamp = datetime.now()
-                self.test_data.append((timestamp.strftime('%Y-%m-%d %H:%M:%S'), temp))
+                self.test_data.append((timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3], temp))
                 self.add_chart_data(timestamp, temp)
-                self.tree.insert('', 'end', values=(timestamp.strftime('%Y-%m-%d %H:%M:%S'), f'{temp:.1f}'))
+                self.tree.insert('', 'end', values=(timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3], f'{temp:.1f}'))
                 self.tree.yview_moveto(1)
                 print(f'API识别成功: {temp:.1f}°C', flush=True)
             else:
