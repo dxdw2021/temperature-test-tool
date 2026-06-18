@@ -249,9 +249,16 @@ class TemperatureTestApp:
         self.threshold_entry = tb.Entry(self.settings_frame, textvariable=self.threshold_var, width=12)
         self.threshold_entry.grid(row=4, column=3, padx=5, pady=2, sticky=W)
 
-        # Row 5: 应用参数按钮
+        # Row 5: 保存路径
+        tb.Label(self.settings_frame, text='保存路径:').grid(row=5, column=0, padx=5, pady=2, sticky=E)
+        self.save_path_var = tk.StringVar(value='.')
+        self.save_path_entry = tb.Entry(self.settings_frame, textvariable=self.save_path_var, width=18)
+        self.save_path_entry.grid(row=5, column=1, columnspan=2, padx=5, pady=2, sticky=EW)
+        tb.Button(self.settings_frame, text='浏览', command=self._browse_save_path, style='secondary.TButton').grid(row=5, column=3, padx=5, pady=2, sticky=W)
+
+        # Row 6: 应用参数按钮
         self.apply_btn = tb.Button(self.settings_frame, text='应用参数', command=self.apply_image_params)
-        self.apply_btn.grid(row=5, column=0, columnspan=4, pady=(4, 2))
+        self.apply_btn.grid(row=6, column=0, columnspan=4, pady=(4, 2))
 
         # ── 控制区域（分 3 行：测试控制 / ADB 配置 / API 配置） ──
         self.control_frame = tb.Frame(self.test_frame)
@@ -366,6 +373,7 @@ class TemperatureTestApp:
             self.alpha_entry,
             self.beta_entry,
             self.threshold_entry,
+            self.save_path_entry,
             self.api_provider_combo,
             self.sf_model_combo,
             self.sf_api_key_entry
@@ -858,6 +866,11 @@ class TemperatureTestApp:
                     config['click_timing'] = config.get('click_timing', 'before')
                     config['click_steps'] = config.get('click_steps', [])
 
+                    # 加载保存路径
+                    save_path = config.get('save_path', '.')
+                    self.save_path_var.set(save_path)
+                    config['save_path'] = save_path
+
                     print('配置加载完成', flush=True)
                     return config
             except Exception as e:
@@ -985,7 +998,8 @@ class TemperatureTestApp:
                 'sf_model': self.sf_model_var.get(),
                 'active_tab': self.notebook.tab(self.notebook.select(), 'text') if hasattr(self, 'notebook') else '测试',
                 'window_width': self.root.winfo_width(),
-                'window_height': self.root.winfo_height()
+                'window_height': self.root.winfo_height(),
+                'save_path': self.save_path_var.get().strip() or '.'
             })
 
             # 保存 SiliconFlow API Key
@@ -1114,9 +1128,9 @@ class TemperatureTestApp:
     
     def open_image_folder(self):
         """打开保存图片的文件夹"""
-        png_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'png')
-        if os.path.exists(png_folder):
-            os.startfile(png_folder)
+        sp = self._get_save_paths()
+        if os.path.exists(sp['png']):
+            os.startfile(sp['png'])
         else:
             messagebox.showerror('错误', '图片文件夹不存在')
     
@@ -1489,30 +1503,53 @@ class TemperatureTestApp:
             if delay > 0:
                 time.sleep(delay)
 
+    def _get_save_paths(self):
+        """获取配置的保存路径相关文件夹"""
+        base = self.config.get('save_path', '.')
+        png_folder = os.path.join(base, 'png')
+        raw_folder = os.path.join(png_folder, 'raw_images')
+        original_folder = os.path.join(png_folder, 'original_images')
+        csv_folder = os.path.join(base, 'csv')
+        debug_folder = os.path.join(base, 'debug')
+        return {
+            'base': base,
+            'png': png_folder,
+            'raw': raw_folder,
+            'original': original_folder,
+            'csv': csv_folder,
+            'debug': debug_folder,
+        }
+
+    def _ensure_save_dirs(self, paths):
+        """确保保存路径文件夹存在"""
+        for key in ['png', 'raw', 'original', 'csv', 'debug']:
+            folder = paths[key]
+            if not os.path.exists(folder):
+                os.makedirs(folder)
+
+    def _browse_save_path(self):
+        path = filedialog.askdirectory(title='选择截图保存目录')
+        if path:
+            self.save_path_var.set(path)
+            self.config['save_path'] = path
+            self.save_config()
+
     def get_temperature(self):
         """获取温度值"""
         try:
-            # 添加延迟，等待图像稳定
             time.sleep(0.2)
-            
-            # 使用capture_screen方法获取截图（传入 crop=False 避免二次裁剪）
+
             screenshot_array = self.capture_screen(crop=False)
             if screenshot_array is None:
                 return
-            
-            # 确保文件夹存在
-            png_folder = 'png'
-            raw_folder = os.path.join('png', 'raw_images')
-            original_folder = os.path.join('png', 'original_images')
-            for folder in [png_folder, raw_folder, original_folder]:
-                if not os.path.exists(folder):
-                    os.makedirs(folder)
-            
-            # 生成当前时间作为文件名
+
+            paths = self._get_save_paths()
+            self._ensure_save_dirs(paths)
+
             current_time = time.strftime("%Y%m%d_%H%M%S")
-            original_filename = os.path.join(original_folder, f'original_{current_time}.png')
-            raw_filename = os.path.join(raw_folder, f'raw_{current_time}.png')
-            processed_filename = os.path.join(png_folder, f'processed_{current_time}.png')
+            original_filename = os.path.join(paths['original'], f'original_{current_time}.png')
+            raw_filename = os.path.join(paths['raw'], f'raw_{current_time}.png')
+            processed_filename = os.path.join(paths['png'], f'processed_{current_time}.png')
             
             # 检查截图是否有效
             if screenshot_array is None or screenshot_array.size == 0:
@@ -1630,22 +1667,20 @@ class TemperatureTestApp:
                 is_negative = '-' in text
             
             if not numbers:
-                print(f'错误: 未能识别到数字，裁剪前原始截图已保存在 {original_folder} 文件夹中，裁剪后原始截图在 {raw_folder} 文件夹中，处理后的图像在 {png_folder} 文件夹中，请检查截图区域是否正确。')
+                print(f'错误: 未能识别到数字，裁剪前原始截图已保存在 {paths["original"]} 文件夹中，裁剪后原始截图在 {paths["raw"]} 文件夹中，处理后的图像在 {paths["png"]} 文件夹中，请检查截图区域是否正确。')
                 return None
             
-            # 转换为浮点数
             temp = float(numbers)
             if is_negative:
                 temp = -temp
                 
-            # 合理性检查
             if temp < -273.15 or temp > 1000:
-                print(f'错误: 识别到的温度值 {temp}°C 超出合理范围，裁剪前原始截图已保存在 {original_folder} 文件夹中，裁剪后原始截图在 {raw_folder} 文件夹中，处理后的图像在 {png_folder} 文件夹中。')
+                print(f'错误: 识别到的温度值 {temp}°C 超出合理范围，裁剪前原始截图已保存在 {paths["original"]} 文件夹中，裁剪后原始截图在 {paths["raw"]} 文件夹中，处理后的图像在 {paths["png"]} 文件夹中。')
                 return None
             
             return temp
         except Exception as e:
-            print(f'错误: 温度读取错误: {str(e)}\n截图已保存在 {png_folder} 文件夹中，请检查截图区域是否正确。')
+            print(f'错误: 温度读取错误: {str(e)}')
             return None
     
     def start_test(self):
@@ -1758,13 +1793,12 @@ class TemperatureTestApp:
         
         # 保存测试数据
         if self.test_data:
-            # 确保csv文件夹存在
-            csv_folder = 'csv'
-            if not os.path.exists(csv_folder):
-                os.makedirs(csv_folder)
+            paths = self._get_save_paths()
+            if not os.path.exists(paths['csv']):
+                os.makedirs(paths['csv'])
             
             df = pd.DataFrame(self.test_data, columns=['时间', '温度值'])
-            filename = os.path.join(csv_folder, f'temperature_test_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
+            filename = os.path.join(paths['csv'], f'temperature_test_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
             df.to_csv(filename, index=False, encoding='utf-8-sig')
             tk.messagebox.showinfo('提示', f'测试已完成，数据已保存至{filename}')
             
@@ -1778,20 +1812,16 @@ class TemperatureTestApp:
     def api_recognize(self):
         """使用API进行OCR识别（支持讯飞/DeepSeek-OCR）"""
         try:
-            # 使用capture_screen获取截图（用bbox裁剪后的区域）
             screenshot_array = self.capture_screen(crop=True)
             if screenshot_array is None:
                 messagebox.showerror('错误', '截图失败')
                 return
-            
-            # 确保png文件夹存在
-            png_folder = 'png'
-            if not os.path.exists(png_folder):
-                os.makedirs(png_folder)
-            
-            # 生成当前时间作为文件名
+
+            sp = self._get_save_paths()
+            self._ensure_save_dirs(sp)
+
             current_time = time.strftime("%Y%m%d_%H%M%S")
-            processed_filename = os.path.join(png_folder, f'api_processed_{current_time}.png')
+            processed_filename = os.path.join(sp['png'], f'api_processed_{current_time}.png')
             
             # 用与get_temperature相同的图像处理流程生成二值化图片
             gray = cv2.cvtColor(screenshot_array, cv2.COLOR_BGR2GRAY)
@@ -1955,8 +1985,9 @@ class TemperatureTestApp:
                     print(f'图像格式转换失败: {str(e)}', flush=True)
                     # 保存原始截图以供调试
                     try:
-                        os.makedirs('debug', exist_ok=True)
-                        debug_path = os.path.join('debug', f'screenshot_{int(time.time())}.png')
+                        sp = self._get_save_paths()
+                        self._ensure_save_dirs(sp)
+                        debug_path = os.path.join(sp['debug'], f'screenshot_{int(time.time())}.png')
                         screenshot.save(debug_path)
                         print(f'原始截图已保存至: {debug_path}', flush=True)
                     except Exception as save_error:
