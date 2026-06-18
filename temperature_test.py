@@ -129,11 +129,9 @@ class TemperatureTestApp:
 
     def create_widgets(self):
         """创建界面元素"""
-        # 主框架
         self.main_frame = tb.Frame(self.root, padding='5')
         self.main_frame.pack(fill=BOTH, expand=YES)
 
-        # 标签页：测试页 + 温度曲线页
         self.notebook = tb.Notebook(self.main_frame, padding=8)
         self.notebook.pack(fill=BOTH, expand=YES)
         self.test_frame = tb.Frame(self.notebook)
@@ -144,8 +142,37 @@ class TemperatureTestApp:
         self.chart_data = []
         self.create_chart_widgets()
 
+        # 滚动容器：Canvas + Scrollbar 包裹测试页所有内容
+        self.test_canvas = tk.Canvas(self.test_frame, highlightthickness=0)
+        self.test_scrollbar = tb.Scrollbar(self.test_frame, orient=VERTICAL, command=self.test_canvas.yview)
+        self.test_scroll_frame = tb.Frame(self.test_canvas)
+        self.test_scroll_frame.bind('<Configure>',
+            lambda e: self.test_canvas.configure(scrollregion=self.test_canvas.bbox('all')))
+        self.test_canvas.create_window((0, 0), window=self.test_scroll_frame, anchor='nw', tags='inner')
+        self.test_canvas.configure(yscrollcommand=self.test_scrollbar.set)
+        # 让内框架宽度跟随画布宽度
+        def _resize_inner(event):
+            self.test_canvas.itemconfig('inner', width=event.width)
+        self.test_canvas.bind('<Configure>', _resize_inner)
+
+        self.test_canvas.pack(side=LEFT, fill=BOTH, expand=YES)
+        self.test_scrollbar.pack(side=RIGHT, fill=Y)
+
+        # 鼠标滚轮滚动（跨平台）
+        def _on_mousewheel(event):
+            self.test_canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        def _bind_wheel(event):
+            self.test_canvas.bind_all('<MouseWheel>', _on_mousewheel)
+        def _unbind_wheel(event):
+            self.test_canvas.unbind_all('<MouseWheel>')
+        self.test_canvas.bind('<Enter>', _bind_wheel)
+        self.test_canvas.bind('<Leave>', _unbind_wheel)
+
+        # 所有子控件创建到 test_scroll_frame
+        sf = self.test_scroll_frame
+
         # 顶部按钮区域
-        self.top_buttons_frame = tb.Frame(self.test_frame)
+        self.top_buttons_frame = tb.Frame(sf)
         self.top_buttons_frame.pack(anchor=NW, pady=(0, 4))
 
         self.config_btn = tb.Button(self.top_buttons_frame, text='设置截图区域', command=self.configure_bbox)
@@ -158,14 +185,14 @@ class TemperatureTestApp:
         self.export_btn.pack(side=LEFT, padx=4)
 
         # 温度显示区域
-        self.temp_frame = tb.LabelFrame(self.test_frame, text='当前温度')
+        self.temp_frame = tb.LabelFrame(sf, text='当前温度')
         self.temp_frame.pack(fill=X, pady=(0, 4))
 
         self.temp_label = tb.Label(self.temp_frame, text='--°C', font=('Arial', 24))
         self.temp_label.pack(pady=4)
 
         # 图像显示区域
-        self.image_frame = tb.LabelFrame(self.test_frame, text='图像预览')
+        self.image_frame = tb.LabelFrame(sf, text='图像预览')
         self.image_frame.pack(fill=BOTH, expand=YES, pady=(0, 4))
         self.image_frame.grid_rowconfigure(0, weight=1)
         self.image_frame.grid_columnconfigure(0, weight=1)
@@ -189,7 +216,7 @@ class TemperatureTestApp:
         self.image_panes.add(self.processed_frame, weight=1)
 
         # ── 测试参数设置区域（4列布局） ──
-        self.settings_frame = tb.LabelFrame(self.test_frame, text='测试参数设置')
+        self.settings_frame = tb.LabelFrame(sf, text='测试参数设置')
         self.settings_frame.pack(fill=X, pady=(0, 4))
 
         # Row 0: 截图方式 + 识别方式
@@ -261,7 +288,7 @@ class TemperatureTestApp:
         self.apply_btn.grid(row=6, column=0, columnspan=4, pady=(4, 2))
 
         # ── 控制区域（分 3 行：测试控制 / ADB 配置 / API 配置） ──
-        self.control_frame = tb.Frame(self.test_frame)
+        self.control_frame = tb.Frame(sf)
         self.control_frame.pack(fill=X, pady=(0, 4))
 
         # 行 1：测试控制
@@ -327,7 +354,7 @@ class TemperatureTestApp:
         self.train_font_btn.pack(side=LEFT, padx=2)
 
         # ── 数据显示区域 ──
-        self.data_frame = tb.LabelFrame(self.test_frame, text='测试数据')
+        self.data_frame = tb.LabelFrame(sf, text='测试数据')
         self.data_frame.pack(fill=BOTH, expand=YES, pady=(0, 4))
 
         columns = ('时间', '温度值')
